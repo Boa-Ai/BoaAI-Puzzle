@@ -7,6 +7,7 @@ use crossterm::{
     },
     terminal::{self, Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen},
 };
+use rand::Rng;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::env;
 use std::fs::{self, OpenOptions};
@@ -17,14 +18,6 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const INDICATOR_COUNT: usize = 6;
 const START_STATE: [NodeColor; INDICATOR_COUNT] = [NodeColor::Off; INDICATOR_COUNT];
-const TARGET_STATE: [NodeColor; INDICATOR_COUNT] = [
-    NodeColor::White,
-    NodeColor::Purple,
-    NodeColor::Green,
-    NodeColor::White,
-    NodeColor::Purple,
-    NodeColor::Green,
-];
 
 const SPLASH_LOGO: &str = r#"
 ..=%@@@@@@@@@@*-..
@@ -124,6 +117,7 @@ enum EmailFocus {
 
 struct PuzzleState {
     initial: [NodeColor; INDICATOR_COUNT],
+    target: [NodeColor; INDICATOR_COUNT],
     current: [NodeColor; INDICATOR_COUNT],
     optimal_moves: usize,
     moves_taken: usize,
@@ -513,7 +507,7 @@ fn draw_puzzle_view(
         SetForegroundColor(Color::DarkGrey),
         Print(format!(
             "Target   [{}]",
-            render_state(TARGET_STATE).to_ascii_uppercase()
+            render_state(puzzle.target).to_ascii_uppercase()
         )),
         MoveTo(x + 3, line + 1),
         Print(format!(
@@ -597,6 +591,7 @@ fn draw_puzzle_view(
             "2) Adjacent buttons (distance 1) advance by +1 step",
             "3) Distance-2 buttons move backward by 1 step",
             "4) Opposite button (distance 3) advances by +3 steps",
+            "Color map: OFF=0 GREEN=1 BLUE=2 RED=3 PURPLE=4 WHITE=5",
         ];
         let mut rules_y = status_y + 2;
         for rule in rules {
@@ -891,7 +886,7 @@ fn handle_puzzle_key(app: &mut App, key: KeyEvent) -> bool {
             true
         }
         KeyCode::F(12) if app.debug => {
-            if let Some(path) = shortest_solution(app.puzzle.current, TARGET_STATE) {
+            if let Some(path) = shortest_solution(app.puzzle.current, app.puzzle.target) {
                 for press in &path {
                     app.puzzle.current = press_indicator(app.puzzle.current, *press);
                 }
@@ -901,7 +896,7 @@ fn handle_puzzle_key(app: &mut App, key: KeyEvent) -> bool {
                 app.puzzle.status = "Debug solve did not find a valid route.".to_string();
             }
 
-            if app.puzzle.current == TARGET_STATE {
+            if app.puzzle.current == app.puzzle.target {
                 transition_to_email(app);
             }
             true
@@ -922,7 +917,7 @@ fn activate_puzzle_focus(app: &mut App) {
             app.puzzle.status = format!("Pressed indicator {}.", index + 1);
         }
         PuzzleFocus::Action(0) => {
-            if let Some(path) = shortest_solution(app.puzzle.current, TARGET_STATE) {
+            if let Some(path) = shortest_solution(app.puzzle.current, app.puzzle.target) {
                 if let Some(first) = path.first() {
                     app.puzzle.status = format!("Hint: press indicator {}.", first + 1);
                 } else {
@@ -948,7 +943,7 @@ fn activate_puzzle_focus(app: &mut App) {
         _ => {}
     }
 
-    if app.puzzle.current == TARGET_STATE {
+    if app.puzzle.current == app.puzzle.target {
         transition_to_email(app);
     }
 }
@@ -1036,19 +1031,23 @@ fn handle_submitted_key(app: &mut App, key: KeyEvent) -> bool {
 
 fn new_puzzle_state() -> PuzzleState {
     let initial = START_STATE;
-    let optimal_moves = shortest_solution(initial, TARGET_STATE)
+    let mut rng = rand::thread_rng();
+    let (target, generated_sequence) = generate_random_target_from_start(&mut rng);
+    let optimal_moves = shortest_solution(initial, target)
         .map(|path| path.len())
         .unwrap_or(0);
     PuzzleState {
         initial,
+        target,
         current: initial,
         optimal_moves,
         moves_taken: 0,
         focus: PuzzleFocus::Indicator(0),
         show_rules: false,
         status: format!(
-            "All buttons start OFF. No move cap. Estimated solve depth: {}.",
-            optimal_moves
+            "Target generated from 6 simulated presses. No move cap. Estimated solve depth: {}. (Simulated sequence length: {})",
+            optimal_moves,
+            generated_sequence.len()
         ),
     }
 }
@@ -1076,6 +1075,22 @@ fn press_indicator(
     }
 
     state
+}
+
+fn generate_random_target_from_start<R: Rng + ?Sized>(
+    rng: &mut R,
+) -> ([NodeColor; INDICATOR_COUNT], Vec<usize>) {
+    loop {
+        let sequence: Vec<usize> = (0..6).map(|_| rng.gen_range(0..INDICATOR_COUNT)).collect();
+        let mut state = START_STATE;
+        for &press in &sequence {
+            state = press_indicator(state, press);
+        }
+
+        if state != START_STATE {
+            return (state, sequence);
+        }
+    }
 }
 
 fn shortest_solution(
@@ -1217,6 +1232,8 @@ fn debug_enabled() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rand::rngs::StdRng;
+    use rand::SeedableRng;
 
     #[test]
     fn default_state_is_all_off() {
@@ -1224,19 +1241,36 @@ mod tests {
     }
 
     #[test]
-    fn shortest_solution_from_default_reaches_target() {
-        let path = shortest_solution(START_STATE, TARGET_STATE).expect("path should exist");
+    fn generated_target_matches_six_simulated_presses() {
+        let mut rng = StdRng::seed_from_u64(42);
+        let (target, sequence) = generate_random_target_from_start(&mut rng);
+
+        assert_eq!(sequence.len(), 6);
+
+        let mut state = START_STATE;
+        for press in sequence {
+            state = press_indicator(state, press);
+        }
+
+        assert_eq!(state, target);
+    }
+
+    #[test]
+    fn shortest_solution_from_default_reaches_generated_target() {
+        let mut rng = StdRng::seed_from_u64(123);
+        let (target, _) = generate_random_target_from_start(&mut rng);
+        let path = shortest_solution(START_STATE, target).expect("path should exist");
         let mut state = START_STATE;
         for index in path {
             state = press_indicator(state, index);
         }
-        assert_eq!(state, TARGET_STATE);
+        assert_eq!(state, target);
     }
 
     #[test]
-    fn default_solution_sequence_matches_expected_walkthrough() {
-        let path = shortest_solution(START_STATE, TARGET_STATE).expect("path should exist");
-        let expected = vec![0, 1, 1, 2, 2, 2, 2, 2, 3, 4, 4, 5, 5, 5, 5, 5];
-        assert_eq!(path, expected);
+    fn generated_target_is_not_all_off() {
+        let mut rng = StdRng::seed_from_u64(7);
+        let (target, _) = generate_random_target_from_start(&mut rng);
+        assert_ne!(target, START_STATE);
     }
 }

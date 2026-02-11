@@ -10,6 +10,7 @@ Flow:
 
 The puzzle is a custom 6-indicator variant:
 - All indicators start at `OFF`
+- Each SSH session gets a random target generated from 6 simulated button presses
 - Explicit in-app rules panel
 - Built-in `Hint` button
 
@@ -45,6 +46,20 @@ BOAAI_DEBUG=1 cargo run
 Inside the puzzle UI, press:
 - `F12` to auto-complete the puzzle immediately
 - Then type email and activate `Confirm Invite`
+
+## Offline Target Solver
+
+Use `solution.py` to compute the shortest sequence from all `OFF` to any target:
+
+```bash
+python solution.py --target "WHITE,PURPLE,GREEN,WHITE,PURPLE,GREEN"
+```
+
+or
+
+```bash
+python solution.py --target "5,4,1,5,4,1"
+```
 
 ## Deploy On Remote Server Without Touching Main SSH Port 22
 
