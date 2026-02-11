@@ -20,7 +20,7 @@ const INDICATOR_COUNT: usize = 6;
 const START_STATE: [NodeColor; INDICATOR_COUNT] = [NodeColor::Off; INDICATOR_COUNT];
 
 const SPLASH_LOGO: &str = r#"
-..=%@@@@@@@@@@*-..
+                                            ..=%@@@@@@@@@@*-..
                                           .+%@@@@@@@@@@@--@@@@@#-.
                                       .-#@@@@@@@@@@@@@@@--@@@@@@@@.
                                     :%@@@@@@@@@@@@@@@@@@@@@@@@@@@@.
@@ -30,7 +30,7 @@ const SPLASH_LOGO: &str = r#"
                              .+@@@@@@@@@@@@+                -@@@@@@@@@@@=
                              =@@@@@@@@@@@#.                  .=@@@@@@@@@@-
                             :@@@@@@@@@@@=                      .@@@@@@@@@@:
-                           .#@@@@@@@@@@#        HACK THE WORLD  -@@@@@@@@@*.
+                           .#@@@@@@@@@@#     HACK THE WORLD     -@@@@@@@@@*.
                            :%@@@@@@@@@@                          *@@@@@@@@@.
                            -@@@@@@@@@@#                          .@@@@@@@@@:
                            -@@@@@@@@@@#                          .@@@@@@@@@:
@@ -214,10 +214,28 @@ fn main() -> io::Result<()> {
 
 fn show_splash_screen(stdout: &mut Stdout) -> io::Result<()> {
     let (cols, rows) = terminal::size().unwrap_or((120, 40));
-    let logo_lines: Vec<&str> = SPLASH_LOGO
+    let raw_logo_lines: Vec<String> = SPLASH_LOGO
         .lines()
         .filter(|line| !line.trim().is_empty())
+        .map(|line| line.trim_end().to_string())
         .collect();
+
+    let common_indent = raw_logo_lines
+        .iter()
+        .map(|line| line.chars().take_while(|c| *c == ' ').count())
+        .min()
+        .unwrap_or(0);
+
+    let logo_lines: Vec<String> = raw_logo_lines
+        .iter()
+        .map(|line| line.chars().skip(common_indent).collect::<String>())
+        .collect();
+
+    let block_width = logo_lines
+        .iter()
+        .map(|line| line.chars().count())
+        .max()
+        .unwrap_or(0) as u16;
 
     execute!(
         stdout,
@@ -228,10 +246,10 @@ fn show_splash_screen(stdout: &mut Stdout) -> io::Result<()> {
     )?;
 
     let block_height = logo_lines.len() as u16 + 2;
+    let start_x = cols.saturating_sub(block_width) / 2;
     let start_y = rows.saturating_sub(block_height) / 2;
 
     for (offset, line) in logo_lines.iter().enumerate() {
-        let x = cols.saturating_sub(line.len() as u16) / 2;
         let color = if line.contains("HACK THE WORLD") {
             Color::White
         } else {
@@ -240,14 +258,14 @@ fn show_splash_screen(stdout: &mut Stdout) -> io::Result<()> {
 
         queue!(
             stdout,
-            MoveTo(x, start_y + offset as u16),
+            MoveTo(start_x, start_y + offset as u16),
             SetForegroundColor(color),
-            Print(*line)
+            Print(line)
         )?;
     }
 
     let subheading = "ACCESS CHALLENGE INITIALIZING";
-    let subheading_x = cols.saturating_sub(subheading.len() as u16) / 2;
+    let subheading_x = start_x + block_width.saturating_sub(subheading.len() as u16) / 2;
     queue!(
         stdout,
         MoveTo(subheading_x, start_y + logo_lines.len() as u16 + 1),
@@ -263,7 +281,7 @@ fn show_splash_screen(stdout: &mut Stdout) -> io::Result<()> {
     )?;
 
     stdout.flush()?;
-    thread::sleep(Duration::from_secs(3));
+    thread::sleep(Duration::from_secs(4));
     execute!(
         stdout,
         Clear(ClearType::All),
@@ -289,7 +307,7 @@ fn draw_app(stdout: &mut Stdout, app: &App) -> io::Result<()> {
         return Ok(());
     }
 
-    let frame_width = cols.saturating_sub(6).min(108);
+    let frame_width = cols.saturating_sub(4).min(124);
     let frame_x = cols.saturating_sub(frame_width) / 2;
     let header_y = 1;
     let body_y = header_y + 4;
@@ -355,7 +373,7 @@ fn draw_header_bar(stdout: &mut Stdout, x: u16, y: u16, width: u16, app: &App) -
     };
 
     let segments = vec![
-        center_text("boaai", 12),
+        center_text("Boa AI", 12),
         center_text(tab_label, 16),
         center_text(
             &format!(
@@ -476,6 +494,56 @@ fn draw_box(
     Ok(())
 }
 
+fn draw_colored_state_line(
+    stdout: &mut Stdout,
+    x: u16,
+    y: u16,
+    label: &str,
+    state: [NodeColor; INDICATOR_COUNT],
+) -> io::Result<()> {
+    let mut cursor_x = x;
+    queue!(
+        stdout,
+        MoveTo(cursor_x, y),
+        SetForegroundColor(Color::DarkGrey),
+        Print(format!("{label}   ["))
+    )?;
+    cursor_x += (label.len() + 4) as u16;
+
+    for (index, color) in state.iter().enumerate() {
+        let token = color.as_str();
+        queue!(
+            stdout,
+            MoveTo(cursor_x, y),
+            SetForegroundColor(color.term_color()),
+            SetAttribute(Attribute::Bold),
+            Print(token),
+            SetAttribute(Attribute::Reset)
+        )?;
+        cursor_x += token.len() as u16;
+
+        if index < INDICATOR_COUNT - 1 {
+            queue!(
+                stdout,
+                MoveTo(cursor_x, y),
+                SetForegroundColor(Color::DarkGrey),
+                Print(" | ")
+            )?;
+            cursor_x += 3;
+        }
+    }
+
+    queue!(
+        stdout,
+        MoveTo(cursor_x, y),
+        SetForegroundColor(Color::DarkGrey),
+        Print("]"),
+        ResetColor
+    )?;
+
+    Ok(())
+}
+
 fn draw_puzzle_view(
     stdout: &mut Stdout,
     x: u16,
@@ -504,12 +572,13 @@ fn draw_puzzle_view(
     queue!(
         stdout,
         MoveTo(x + 3, line),
-        SetForegroundColor(Color::DarkGrey),
-        Print(format!(
-            "Target   [{}]",
-            render_state(puzzle.target).to_ascii_uppercase()
-        )),
+        SetForegroundColor(Color::DarkGrey)
+    )?;
+    draw_colored_state_line(stdout, x + 3, line, "Target", puzzle.target)?;
+    queue!(
+        stdout,
         MoveTo(x + 3, line + 1),
+        SetForegroundColor(Color::DarkGrey),
         Print(format!(
             "Current  [{}]",
             render_state(puzzle.current).to_ascii_uppercase()
@@ -517,7 +586,11 @@ fn draw_puzzle_view(
     )?;
 
     let indicator_y = line + 3;
-    let indicator_width = 16;
+    let indicator_width = (width
+        .saturating_sub(8)
+        .saturating_sub(2 * (INDICATOR_COUNT as u16 - 1))
+        / INDICATOR_COUNT as u16)
+        .clamp(10, 16);
     let indicator_gap = 2;
     let indicator_span = indicator_width * INDICATOR_COUNT as u16 + indicator_gap * 3;
     let indicator_start_x = x + width.saturating_sub(indicator_span) / 2;
@@ -919,7 +992,7 @@ fn activate_puzzle_focus(app: &mut App) {
         PuzzleFocus::Action(0) => {
             if let Some(path) = shortest_solution(app.puzzle.current, app.puzzle.target) {
                 if let Some(first) = path.first() {
-                    app.puzzle.status = format!("Hint: press indicator {}.", first + 1);
+                    app.puzzle.status = format!("Hint: Haha, there is no hint. But if there were, it would be think outside the terminal.");
                 } else {
                     app.puzzle.status = "State already matches target.".to_string();
                 }
@@ -1032,7 +1105,7 @@ fn handle_submitted_key(app: &mut App, key: KeyEvent) -> bool {
 fn new_puzzle_state() -> PuzzleState {
     let initial = START_STATE;
     let mut rng = rand::thread_rng();
-    let (target, generated_sequence) = generate_random_target_from_start(&mut rng);
+    let (target, _generated_sequence) = generate_random_target_from_start(&mut rng);
     let optimal_moves = shortest_solution(initial, target)
         .map(|path| path.len())
         .unwrap_or(0);
@@ -1044,11 +1117,7 @@ fn new_puzzle_state() -> PuzzleState {
         moves_taken: 0,
         focus: PuzzleFocus::Indicator(0),
         show_rules: false,
-        status: format!(
-            "Target generated from 6 simulated presses. No move cap. Estimated solve depth: {}. (Simulated sequence length: {})",
-            optimal_moves,
-            generated_sequence.len()
-        ),
+        status: "Good luck".to_string(),
     }
 }
 
