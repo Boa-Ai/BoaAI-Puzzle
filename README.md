@@ -37,6 +37,38 @@ Optional environment variables:
 - `BOAAI_DEBUG=1`: enables debug hotkey `F12` for instant solve.
 - `BOAAI_INVITE_FILE=/path/to/invite_submissions.csv`: custom submission output file.
 
+## Run As Anonymous SSH Service (Port 1337)
+
+This project now includes `ssh_gateway.py`, which:
+- listens for SSH on `1337`
+- disables authentication (username/password/keys not required)
+- launches one puzzle process per connection (concurrent users supported)
+
+1. Build the puzzle binary:
+```bash
+cargo build --release
+```
+
+2. Install gateway dependency:
+```bash
+python3 -m pip install --user asyncssh
+```
+
+3. Start the SSH gateway:
+```bash
+python3 ssh_gateway.py --host 0.0.0.0 --port 1337 --binary target/release/ssh_store
+```
+
+4. Connect from any machine:
+```bash
+ssh -p 1337 anything@your-domain.com
+```
+
+Notes:
+- The SSH username is ignored.
+- Port `22` is not touched.
+- Each connected user gets an isolated puzzle session.
+
 ## Quick Solve For Debugging
 
 ```bash
@@ -61,61 +93,55 @@ or
 python solution.py --target "5,4,1,5,4,1"
 ```
 
-## Deploy On Remote Server Without Touching Main SSH Port 22
+## Production Service (Systemd)
 
-Use a second `sshd` instance on a different port (example: `2222`) and force the puzzle command for one dedicated user.
+Run gateway as a managed service while leaving your normal SSH daemon on port `22`.
 
-1. Build and install binary:
+1. Install app on server:
 ```bash
-cd /opt/boaai/BoaAI-Puzzle
+sudo mkdir -p /opt/boaai
+sudo chown -R $USER:$USER /opt/boaai
+cd /opt/boaai
+git clone <your-repo-url> BoaAI-Puzzle
+cd BoaAI-Puzzle
 cargo build --release
-sudo install -m 755 target/release/ssh_store /opt/boaai/boaai-puzzle
+python3 -m pip install --user asyncssh
 ```
 
-2. Create dedicated SSH user:
+2. Create service file `/etc/systemd/system/boaai-puzzle-ssh.service`:
+```ini
+[Unit]
+Description=BoaAI Anonymous SSH Puzzle Gateway
+After=network.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/opt/boaai/BoaAI-Puzzle
+ExecStart=/usr/bin/python3 /opt/boaai/BoaAI-Puzzle/ssh_gateway.py --host 0.0.0.0 --port 1337 --binary /opt/boaai/BoaAI-Puzzle/target/release/ssh_store
+Restart=always
+RestartSec=2
+Environment=BOAAI_INVITE_FILE=/opt/boaai/BoaAI-Puzzle/invite_submissions.csv
+
+[Install]
+WantedBy=multi-user.target
+```
+
+3. Enable and start:
 ```bash
-sudo useradd -m -s /usr/sbin/nologin puzzle
-sudo mkdir -p /home/puzzle/.ssh
-sudo chown -R puzzle:puzzle /home/puzzle/.ssh
-sudo chmod 700 /home/puzzle/.ssh
-```
-Add keys to `/home/puzzle/.ssh/authorized_keys` and set `chmod 600`.
-
-3. Create a separate SSH config at `/etc/ssh/sshd_config_puzzle`:
-```conf
-Port 2222
-ListenAddress 0.0.0.0
-Protocol 2
-HostKey /etc/ssh/ssh_host_ed25519_key
-PidFile /run/sshd-puzzle.pid
-PasswordAuthentication no
-KbdInteractiveAuthentication no
-PermitRootLogin no
-AllowUsers puzzle
-AuthorizedKeysFile .ssh/authorized_keys
-UsePAM yes
-
-Match User puzzle
-    ForceCommand /opt/boaai/boaai-puzzle
-    PermitTTY yes
-    AllowTcpForwarding no
-    X11Forwarding no
+sudo systemctl daemon-reload
+sudo systemctl enable --now boaai-puzzle-ssh.service
+sudo systemctl status boaai-puzzle-ssh.service
 ```
 
-4. Validate and start separate daemon:
+4. Open firewall + point DNS:
 ```bash
-sudo /usr/sbin/sshd -f /etc/ssh/sshd_config_puzzle -t
-sudo /usr/sbin/sshd -f /etc/ssh/sshd_config_puzzle
+sudo ufw allow 1337/tcp
 ```
 
-5. Open firewall for puzzle port only:
+Then users connect with:
 ```bash
-sudo ufw allow 2222/tcp
+ssh -p 1337 anything@puzzle.example.com
 ```
 
-6. Point domain/subdomain DNS (for example `puzzle.example.com`) to the server IP and connect:
-```bash
-ssh -p 2222 puzzle@puzzle.example.com
-```
-
-Port `22` and your normal SSH workflow stay unchanged.
+Your main SSH service on port `22` remains unchanged.
