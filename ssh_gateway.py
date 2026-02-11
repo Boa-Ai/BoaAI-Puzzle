@@ -9,12 +9,13 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import errno
 import os
 import pty
 import struct
 import termios
 from pathlib import Path
-from typing import Callable
+from typing import Awaitable, Callable
 
 import asyncssh
 
@@ -79,12 +80,23 @@ class NoAuthSSHServer(asyncssh.SSHServer):
         return False
 
 
-def make_process_handler(binary: Path) -> Callable[[asyncssh.SSHServerProcess], asyncio.Future]:
+def _write_all(fd: int, data: bytes) -> None:
+    view = memoryview(data)
+    while view:
+        written = os.write(fd, view)
+        if written <= 0:
+            raise OSError("short write to PTY")
+        view = view[written:]
+
+
+def make_process_handler(binary: Path) -> Callable[[asyncssh.SSHServerProcess], Awaitable[None]]:
     async def handle(process: asyncssh.SSHServerProcess) -> None:
         master_fd, slave_fd = pty.openpty()
-        master_reader = None
-        master_writer = None
         child = None
+        ssh_to_pty_task = None
+        pty_to_ssh_task = None
+        child_wait_task = None
+        client_wait_task = None
 
         try:
             cols, rows, _, _ = process.get_terminal_size()
@@ -102,13 +114,69 @@ def make_process_handler(binary: Path) -> Callable[[asyncssh.SSHServerProcess], 
             os.close(slave_fd)
             slave_fd = None
 
-            # Use duplicated FDs so stdin/stdout redirection doesn't race-close
-            # the same descriptor from multiple asyncio transports.
-            master_writer = os.fdopen(os.dup(master_fd), "wb", buffering=0)
-            master_reader = os.fdopen(os.dup(master_fd), "rb", buffering=0)
+            async def ssh_to_pty() -> None:
+                try:
+                    while True:
+                        data = await process.stdin.read(8192)
+                        if not data:
+                            break
+                        await asyncio.to_thread(_write_all, master_fd, data)
+                except (asyncssh.Error, OSError, BrokenPipeError):
+                    pass
 
-            # Bridge SSH channel <-> PTY.
-            await process.redirect(stdin=master_writer, stdout=master_reader)
+            async def pty_to_ssh() -> None:
+                while True:
+                    try:
+                        data = await asyncio.to_thread(os.read, master_fd, 8192)
+                    except OSError as exc:
+                        # PTY returns EIO when slave side closes (normal on child exit).
+                        if exc.errno == errno.EIO:
+                            break
+                        raise
+
+                    if not data:
+                        break
+
+                    try:
+                        process.stdout.write(data)
+                        await process.stdout.drain()
+                    except asyncssh.Error:
+                        break
+
+            ssh_to_pty_task = asyncio.create_task(ssh_to_pty())
+            pty_to_ssh_task = asyncio.create_task(pty_to_ssh())
+            child_wait_task = asyncio.create_task(child.wait())
+            client_wait_task = asyncio.create_task(process.wait_closed())
+
+            done, pending = await asyncio.wait(
+                {child_wait_task, client_wait_task, ssh_to_pty_task, pty_to_ssh_task},
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+
+            if child_wait_task in done and not process.is_closing():
+                process.exit(child.returncode or 0)
+
+            if client_wait_task in done and child.returncode is None:
+                child.terminate()
+                try:
+                    await asyncio.wait_for(child.wait(), timeout=3)
+                except asyncio.TimeoutError:
+                    child.kill()
+                    await child.wait()
+
+            for task in pending:
+                task.cancel()
+
+            await asyncio.gather(
+                ssh_to_pty_task,
+                pty_to_ssh_task,
+                child_wait_task,
+                client_wait_task,
+                return_exceptions=True,
+            )
+        except (asyncssh.Error, OSError, BrokenPipeError):
+            # Connection churn is expected under internet traffic; keep handler quiet.
+            pass
         finally:
             if child is not None and child.returncode is None:
                 child.terminate()
@@ -117,10 +185,9 @@ def make_process_handler(binary: Path) -> Callable[[asyncssh.SSHServerProcess], 
                 except asyncio.TimeoutError:
                     child.kill()
                     await child.wait()
-            if master_reader is not None:
-                master_reader.close()
-            if master_writer is not None:
-                master_writer.close()
+            for task in (ssh_to_pty_task, pty_to_ssh_task, child_wait_task, client_wait_task):
+                if task is not None and not task.done():
+                    task.cancel()
             try:
                 os.close(master_fd)
             except OSError:
